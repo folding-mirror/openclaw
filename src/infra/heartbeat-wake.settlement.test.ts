@@ -5,6 +5,10 @@ import {
   requestHeartbeatAndWait,
   setHeartbeatWakeHandler,
 } from "./heartbeat-wake.js";
+import {
+  requestSessionEventWakeAndWait,
+  setSessionEventWakeHandler,
+} from "./session-event-wake.js";
 
 describe("heartbeat wake settlement", () => {
   let disposeHandler: (() => void) | undefined;
@@ -27,6 +31,61 @@ describe("heartbeat wake settlement", () => {
   function setHandler(handler: Parameters<typeof setHeartbeatWakeHandler>[0]) {
     disposeHandler = setHeartbeatWakeHandler(handler);
   }
+
+  it("settles ready work after installation when a later target is admitted", async () => {
+    vi.useFakeTimers();
+    setHandler(null);
+    const settled = vi.fn();
+    const wake = { source: "session-state" as const, intent: "immediate" as const };
+    void requestHeartbeatAndWait({
+      ...wake,
+      sessionKey: "agent:main:ready",
+      coalesceMs: 0,
+    }).then(settled);
+    const handler = vi.fn().mockResolvedValue({ status: "ran", durationMs: 7 });
+    setHandler(handler);
+    const later = requestHeartbeatAndWait({
+      ...wake,
+      sessionKey: "agent:main:later",
+      coalesceMs: 5_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toHaveBeenCalledExactlyOnceWith({ status: "ran", durationMs: 7 });
+    expect(handler.mock.calls.map(([request]) => request.sessionKey)).toEqual(["agent:main:ready"]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(later).resolves.toEqual({ status: "ran", durationMs: 7 });
+    expect(handler.mock.calls.map(([request]) => request.sessionKey)).toEqual([
+      "agent:main:ready",
+      "agent:main:later",
+    ]);
+  });
+
+  it("shares one turn between the public heartbeat and session wake entry points", async () => {
+    vi.useFakeTimers();
+    const handler = vi.fn().mockResolvedValue({ status: "ran", durationMs: 7 });
+    const dispose = setSessionEventWakeHandler(handler);
+    const wake = {
+      source: "cron" as const,
+      intent: "event" as const,
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      coalesceMs: 100,
+    };
+    const settled = vi.fn();
+    try {
+      void requestHeartbeatAndWait(wake).then(settled);
+      void requestSessionEventWakeAndWait(wake).then(settled);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(handler).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledTimes(2);
+      expect(settled).toHaveBeenNthCalledWith(1, { status: "ran", durationMs: 7 });
+      expect(settled).toHaveBeenNthCalledWith(2, { status: "ran", durationMs: 7 });
+    } finally {
+      dispose();
+    }
+  });
 
   it("settles every caller represented by one coalesced wake", async () => {
     vi.useFakeTimers();
